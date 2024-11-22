@@ -215,7 +215,7 @@ class Generator(nn.Module):
         self.return_flow = return_flow
 
         if checkpoint is not None:
-            generator_state_dict = torch.load(checkpoint)['G']
+            generator_state_dict = torch.load(checkpoint, weights_only=True)['G']
             self.load_state_dict(generator_state_dict, strict=True)
         self.eval();
 
