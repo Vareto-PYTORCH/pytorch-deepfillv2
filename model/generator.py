@@ -1,6 +1,6 @@
 import torch
 
-from .base_funcs import _init_conv_layer, downsampling_nn_tf, extract_image_patches, flow_to_image, same_padding
+from .base_funcs import _init_conv_layer, downsampling_nn_tf, extract_image_patches, flow_to_image, output_to_image, same_padding
 
 
 class GConv(torch.nn.Module):
@@ -148,6 +148,7 @@ class ContextualAttention(torch.nn.Module):
         self.n_down = n_down
         self.return_flow = return_flow
 
+
     def forward(self, f, b, mask=None):
         """
         Forward pass of the contextual attention layer.
@@ -166,8 +167,7 @@ class ContextualAttention(torch.nn.Module):
         
         # Extract patches from background for matching
         kernel = 2 * self.rate
-        raw_w = extract_image_patches(b, ksizes=[kernel, kernel], strides=[self.rate*self.stride,
-                                     self.rate*self.stride], rates=[1, 1], padding='same')
+        raw_w = extract_image_patches(b, ksizes=[kernel, kernel], strides=[self.rate*self.stride, self.rate*self.stride], rates=[1, 1], padding='same')
         raw_w = raw_w.view(raw_int_bs[0], raw_int_bs[1], kernel, kernel, -1).permute(0, 4, 1, 2, 3)
         raw_w_groups = torch.split(raw_w, 1, dim=0)  # Split patches into groups
 
@@ -180,8 +180,7 @@ class ContextualAttention(torch.nn.Module):
         f_groups = torch.split(f, 1, dim=0)
 
         # Extract smaller patches from downsampled background
-        w = extract_image_patches(b, ksizes=[self.ksize, self.ksize], strides=[self.stride, self.stride],
-                                  rates=[1, 1], padding='same')
+        w = extract_image_patches(b, ksizes=[self.ksize, self.ksize], strides=[self.stride, self.stride], rates=[1, 1], padding='same')
         w = w.view(int_bs[0], int_bs[1], self.ksize, self.ksize, -1).permute(0, 4, 1, 2, 3)
         w_groups = torch.split(w, 1, dim=0)  # Split smaller patches into groups
 
@@ -190,14 +189,13 @@ class ContextualAttention(torch.nn.Module):
             mask = torch.zeros([int_bs[0], 1, int_bs[2], int_bs[3]], device=device)
         else:
             mask = downsampling_nn_tf(mask, n=(2**self.n_down) * self.rate)
-        m = extract_image_patches(mask, ksizes=[self.ksize, self.ksize], strides=[self.stride, self.stride],
-                                  rates=[1, 1], padding='same')
+        m = extract_image_patches(mask, ksizes=[self.ksize, self.ksize], strides=[self.stride, self.stride], rates=[1, 1], padding='same')
         m = m.view(mask.size(0), mask.size(1), self.ksize, self.ksize, -1).permute(0, 4, 1, 2, 3)[0]
         mm = (torch.mean(m, axis=[1, 2, 3], keepdim=True) == 0.).float().permute(1, 0, 2, 3)
 
         # Process each patch in foreground
-        y = []
-        offsets = []
+        y= list()
+        offsets= list()
         k = self.fuse_k
         scale = self.softmax_scale
         fuse_weight = torch.eye(k, device=device).view(1, 1, k, k)
@@ -274,23 +272,24 @@ class Generator(torch.nn.Module):
     def __init__(self, cnum_in=5, cnum=48, return_flow=False, checkpoint=None):
         super().__init__()
         
-        # Stage 1: Initial inpainting layers
+        # Stage 1: Initial layers with convolution and atrous branches
+        # Convolutional Branch
         self.conv1 = GConv(cnum_in, cnum // 2, 5, 1, padding=2)
         self.conv2_downsample = GConv(cnum // 2, cnum, 3, 2)
         self.conv3 = GConv(cnum, cnum, 3, 1)
         self.conv4_downsample = GConv(cnum, 2 * cnum, 3, 2)
         self.conv5 = GConv(2 * cnum, 2 * cnum, 3, 1)
-        
-        # Atrous (dilated) convolutions to expand receptive fields in stage 1
         self.conv6 = GConv(2 * cnum, 2 * cnum, 3, 1)
+
+        # Atrous (dilated) convolutions to expand receptive fields in stage 1
         self.conv7_atrous = GConv(2 * cnum, 2 * cnum, 3, rate=2, padding=2)
         self.conv8_atrous = GConv(2 * cnum, 2 * cnum, 3, rate=4, padding=4)
         self.conv9_atrous = GConv(2 * cnum, 2 * cnum, 3, rate=8, padding=8)
         self.conv10_atrous = GConv(2 * cnum, 2 * cnum, 3, rate=16, padding=16)
-        self.conv11 = GConv(2 * cnum, 2 * cnum, 3, 1)
-        self.conv12 = GConv(2 * cnum, 2 * cnum, 3, 1)
         
         # Upsampling layers for stage 1
+        self.conv11 = GConv(2 * cnum, 2 * cnum, 3, 1)
+        self.conv12 = GConv(2 * cnum, 2 * cnum, 3, 1)
         self.conv13_upsample = GDeConv(2 * cnum, cnum)
         self.conv14 = GConv(cnum, cnum, 3, 1)
         self.conv15_upsample = GDeConv(cnum, cnum // 2)
@@ -307,9 +306,9 @@ class Generator(torch.nn.Module):
         self.xconv3 = GConv(cnum // 2, cnum, 3, 1)
         self.xconv4_downsample = GConv(cnum, cnum, 3, 2)
         self.xconv5 = GConv(cnum, 2 * cnum, 3, 1)
+        self.xconv6 = GConv(2 * cnum, 2 * cnum, 3, 1)
         
         # Atrous convolutions for the convolutional branch
-        self.xconv6 = GConv(2 * cnum, 2 * cnum, 3, 1)
         self.xconv7_atrous = GConv(2 * cnum, 2 * cnum, 3, rate=2, padding=2)
         self.xconv8_atrous = GConv(2 * cnum, 2 * cnum, 3, rate=4, padding=4)
         self.xconv9_atrous = GConv(2 * cnum, 2 * cnum, 3, rate=8, padding=8)
@@ -321,8 +320,8 @@ class Generator(torch.nn.Module):
         self.pmconv3 = GConv(cnum // 2, cnum, 3, 1)
         self.pmconv4_downsample = GConv(cnum, 2 * cnum, 3, 2)
         self.pmconv5 = GConv(2 * cnum, 2 * cnum, 3, 1)
-        
         self.pmconv6 = GConv(2 * cnum, 2 * cnum, 3, 1, activation=torch.nn.ReLU())
+
         self.contextual_attention = ContextualAttention(ksize=3, stride=1, rate=2, fuse_k=3, softmax_scale=10, fuse=False, device_ids=None, n_down=2, return_flow=return_flow)
         
         # Refinement layers after attention
@@ -347,6 +346,7 @@ class Generator(torch.nn.Module):
             generator_state_dict = torch.load(checkpoint, weights_only=True)['G']
             self.load_state_dict(generator_state_dict, strict=True)
         self.eval()
+
 
     def forward(self, x, mask):
         """
@@ -437,3 +437,65 @@ class Generator(torch.nn.Module):
             return x_stage1, x_stage2, offset_flow
         
         return x_stage1, x_stage2
+
+
+    @torch.inference_mode()
+    def predict(self, image, mask, return_vals=['inpainted', 'stage1'], device='cuda'):
+        """
+        Performs inpainting inference on an input image with a mask, optionally returning various stages of the process.
+        
+        Args:
+            image (torch.Tensor): Input image tensor with shape [C, H, W], where C is the channel count.
+            mask (torch.Tensor): Binary mask tensor with shape [1, H, W], where masked areas are > 0.
+            return_vals (list of str): List specifying which outputs to return. Options include 'inpainted', 'stage1', 'stage2', and 'flow'.
+            device (str): Device on which to perform computation, e.g., 'cuda' or 'cpu'.
+
+        Returns:
+            list of torch.Tensor: List of requested output stages as specified in return_vals. Each output is an image tensor.
+        """
+        
+        # Extract height and width of the input image
+        _, h, w = image.shape
+        grid = 8  # Define the grid size to adjust input dimensions for the network
+
+        # Resize image and mask to be compatible with grid size and add batch dimension
+        image = image[:3, :h // grid * grid, :w // grid * grid].unsqueeze(0)  # Keep only first 3 channels
+        mask = mask[0:1, :h // grid * grid, :w // grid * grid].unsqueeze(0)  # Use only one channel for mask
+
+        # Normalize the image to range [-1, 1]
+        image = (image * 2 - 1.)
+
+        # Convert mask to float where masked areas are 1 and unmasked areas are 0
+        mask = (mask > 0.).to(dtype=torch.float32)
+
+        # Apply mask to image, effectively removing masked areas
+        image_masked = image * (1. - mask)
+
+        # Prepare input for the inpainting network
+        ones_x = torch.ones_like(image_masked)[:, 0:1, :, :]  # Create a single-channel tensor of ones
+        x = torch.cat([image_masked, ones_x, ones_x * mask], dim=1)  # Concatenate image, ones, and masked areas
+
+        # Perform the forward pass, possibly including flow offset if required
+        if self.return_flow:
+            x_stage1, x_stage2, offset_flow = self.forward(x, mask)
+        else:
+            x_stage1, x_stage2 = self.forward(x, mask)
+
+        # Combine inpainted regions with the unmasked parts of the original image
+        image_compl = image * (1. - mask) + x_stage2 * mask
+
+        output = []  # Prepare list to hold requested outputs
+        for return_val in return_vals:
+            # Determine which stages to return based on return_vals
+            if return_val.lower() == 'stage1':
+                output.append(output_to_image(x_stage1))
+            elif return_val.lower() == 'stage2':
+                output.append(output_to_image(x_stage2))
+            elif return_val.lower() == 'inpainted':
+                output.append(output_to_image(image_compl))
+            elif return_val.lower() == 'flow' and self.return_flow:
+                output.append(offset_flow)
+            else:
+                print(f'Invalid return value: {return_val}')  # Handle any invalid options
+
+        return output  # Return the list of requested outputs
